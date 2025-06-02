@@ -655,8 +655,18 @@ select_disk() {
         user_input=$(echo "$user_input" | awk -F' ' '{print $1}') # Remove size from input
         [ ! -e "$user_input" ] && log_fail "Disk does not exists" && return 1
         ARCH_OS_DISK="$user_input" # Set property
-        [[ "$ARCH_OS_DISK" = "/dev/nvm"* ]] && ARCH_OS_BOOT_PARTITION="${ARCH_OS_DISK}p1" || ARCH_OS_BOOT_PARTITION="${ARCH_OS_DISK}1"
-        [[ "$ARCH_OS_DISK" = "/dev/nvm"* ]] && ARCH_OS_ROOT_PARTITION="${ARCH_OS_DISK}p2" || ARCH_OS_ROOT_PARTITION="${ARCH_OS_DISK}2"
+        
+        # Improved detection for NVMe devices
+        if [[ "$ARCH_OS_DISK" =~ /dev/nvme[0-9]+n[0-9]+ ]]; then
+            ARCH_OS_BOOT_PARTITION="${ARCH_OS_DISK}p1"
+            ARCH_OS_ROOT_PARTITION="${ARCH_OS_DISK}p2"
+            log_info "NVMe device detected: Using p1/p2 partition naming"
+        else
+            ARCH_OS_BOOT_PARTITION="${ARCH_OS_DISK}1"
+            ARCH_OS_ROOT_PARTITION="${ARCH_OS_DISK}2"
+            log_info "Standard device detected: Using 1/2 partition naming"
+        fi
+        
         properties_generate # Generate properties file
     fi
     gum_property "Disk" "$ARCH_OS_DISK"
@@ -937,6 +947,10 @@ exec_init_installation() {
         pgrep reflector &>/dev/null && log_fail "Reflector timeout after 180 seconds" && exit 1
         rm -f /var/lib/pacman/db.lck # Remove pacman lock file if exists
         timedatectl set-ntp true     # Set time
+        
+        # Update keyring before starting installation
+        log_info "Updating archlinux-keyring..."
+        pacman -Sy --noconfirm archlinux-keyring
         # Make sure everything is unmounted before start install
         swapoff -a || true
         umount -R /mnt/recovery || true
@@ -1059,8 +1073,14 @@ exec_pacstrap_core() {
         # Add snapper packages
         [ "$ARCH_OS_FILESYSTEM" = "btrfs" ] && [ "$ARCH_OS_SNAPPER_ENABLED" = "true" ] && packages+=(snapper)
 
-        # Install core packages and initialize an empty pacman keyring in the target
-        pacstrap -K /mnt "${packages[@]}"
+        # Update keyring and mirrorlist before pacstrap
+        pacman -Sy --noconfirm archlinux-keyring
+        
+        # Try pacstrap without -K option first, then fallback to -K if needed
+        if ! pacstrap /mnt "${packages[@]}"; then
+            log_warn "Standard pacstrap failed, trying with -K option..."
+            pacstrap -K /mnt "${packages[@]}"
+        fi
 
         # Generate /etc/fstab
         genfstab -U /mnt >>/mnt/etc/fstab
